@@ -1,3 +1,4 @@
 # Pycharm files
 .idea/
 */__pycache__/*
+mrmp/solvers/__pycache__/
