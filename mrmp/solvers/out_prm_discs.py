@@ -17,6 +17,50 @@ import bounding_box
 # Number of nearest neighbors to search for in the k-d tree
 K = 15
 
+def calculate_vc_weight(p_vc, q_vc, num_robots):
+    sum_of_weights = 0
+    for i in range(num_robots):
+        curr_p_vc = p_vc[i]
+        curr_q_vc = q_vc[i]
+        if curr_p_vc == 0:
+            curr_p_vc = 1e-3
+        if curr_q_vc == 0:
+            curr_q_vc = 1e-3
+
+        sum_of_weights += ((1 / curr_p_vc ** 2) + (1 / curr_q_vc ** 2)) / 2
+
+    return sum_of_weights
+
+def vertical_clearance(p, radii, min_y, max_y, collision_detectors, num_robots):
+    vc = []
+    point = point_d_to_arr(p)
+    for i in range(num_robots):
+        p_x, p_y = point[2*i], point[2*i+1]
+        radius = radii[i].to_double()
+        collision_detector = collision_detectors[i]
+
+        upper_clearance, lower_clearance = 0, 0
+        resolution = 0.5
+        # calculate upper clearance
+        curr_upper_y = p_y + resolution * radius
+        curr_upper = Point_2(FT(p_x), FT(curr_upper_y))
+        while curr_upper_y <= max_y and collision_detector.is_point_valid(curr_upper):
+            upper_clearance = abs(p_y - curr_upper_y)
+            curr_upper_y = curr_upper_y + resolution * radius
+            curr_upper = Point_2(FT(p_x), FT(curr_upper_y))
+
+        # calculate lower clearance
+        curr_lower_y = p_y - resolution * radius
+        curr_lower = Point_2(FT(p_x), FT(curr_lower_y))
+        while curr_lower_y >= min_y and collision_detector.is_point_valid(curr_lower):
+            lower_clearance = abs(p_y - curr_lower_y)
+            curr_lower_y = curr_lower_y - resolution * radius
+            curr_lower = Point_2(FT(p_x), FT(curr_lower_y))
+
+        clearance = min(upper_clearance, lower_clearance)
+        vc.append(clearance)
+    return vc
+
 # generate_path() is our main PRM function
 # it constructs a PRM (probabilistic roadmap)
 # and searches in it for a path from start (robots) to target (destinations)
@@ -54,8 +98,13 @@ def generate_path_disc(robots, obstacles, disc_obstacles, destinations, argument
     # G is an undirected graph, which will represent the PRM
     G = nx.Graph()
     points = [sources, destinations]
+    vcs = {}
+    for p in points:
+        vc = vertical_clearance(p, radii, min_y, max_y, collision_detectors, num_robots)
+        G.add_node(p)
+        vcs[p] = vc
     # we also add these two configurations as nodes to the PRM G
-    G.add_nodes_from([sources, destinations])
+    # G.add_nodes_from([sources, destinations])
     print('Sampling landmarks', file=writer)
 
 
@@ -68,23 +117,24 @@ def generate_path_disc(robots, obstacles, disc_obstacles, destinations, argument
             return path, G
 
         p = sample_valid_landmark(min_x, max_x, min_y, max_y, collision_detectors, num_robots, radii)
+        vc = vertical_clearance(p, radii, min_y, max_y, collision_detectors, num_robots)
         G.add_node(p)
         points.append(p)
+        vcs[p] = vc
         if i % 500 == 0:
             print(i, "landmarks sampled", file=writer)
     print(num_landmarks, "landmarks sampled", file=writer)
 
     ### !!!
-    # Distnace functions
+    # Distance functions
     ### !!!
     distance = sum_distances.sum_distances(num_robots)
     custom_dist = sum_distances.numpy_sum_distance_for_n(num_robots)
-
     _points = np.array([point_d_to_arr(p) for p in points])
 
 
     ########################
-    # Constract the roadmap
+    # Construct the roadmap
     ########################
     # User defined metric cannot be used with the kd_tree algorithm
     kdt = sklearn.neighbors.NearestNeighbors(n_neighbors=K, metric=custom_dist, algorithm='auto')
@@ -100,14 +150,16 @@ def generate_path_disc(robots, obstacles, disc_obstacles, destinations, argument
         k_neighbors = kdt.kneighbors([_points[i]], return_distance=False)
 
         if edge_valid(collision_detectors, p, destinations, num_robots, radii):
-            d = distance.transformed_distance(p, destinations).to_double()
+            # d = distance.transformed_distance(p, destinations).to_double()
+            d = calculate_vc_weight(vcs[p], vcs[destinations], num_robots)
             G.add_edge(p, destinations, weight=d)
         for j in k_neighbors[0]:
             neighbor = points[j]
             if not G.has_edge(p, neighbor):
                 # check if we can add an edge to the graph
                 if edge_valid(collision_detectors, p, neighbor, num_robots, radii):
-                    d = distance.transformed_distance(p, neighbor).to_double()
+                    # d = distance.transformed_distance(p, neighbor).to_double()
+                    d = calculate_vc_weight(vcs[p], vcs[neighbor ], num_robots)
                     G.add_edge(p, neighbor, weight=d)
         if i % 500 == 0:
             print('Connected', i, 'landmarks to their nearest neighbors', file=writer)
